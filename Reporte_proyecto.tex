@@ -1,0 +1,705 @@
+\documentclass[12pt,letterpaper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-nodecimaldot]{babel}
+
+\usepackage{geometry}
+\geometry{
+    letterpaper,
+    top=2.5cm,
+    bottom=2.5cm,
+    left=2.7cm,
+    right=2.7cm
+}
+
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{setspace}
+\usepackage{parskip}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+
+\usepackage{graphicx}
+\usepackage{xcolor}
+
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+
+\usepackage{listings}
+
+\usepackage{tikz}
+\usetikzlibrary{
+    arrows.meta,
+    positioning,
+    shapes.geometric,
+    fit,
+    backgrounds
+}
+
+\usepackage{float}
+\usepackage{enumitem}
+
+\usepackage{hyperref}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue,
+    pdftitle={Proyecto Cliente-Servidor},
+    pdfauthor={Hugo Sánchez}
+}
+
+\usepackage{fancyhdr}
+
+\onehalfspacing
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{Proyecto 1 -- MyP}
+\rhead{Hugo Sánchez - Modelado y Programación}
+\cfoot{\thepage}
+
+\setcounter{tocdepth}{2}
+
+\definecolor{codegray}{gray}{0.95}
+\definecolor{commentgray}{gray}{0.45}
+
+\lstdefinestyle{cppstyle}{
+    language=C++,
+    backgroundcolor=\color{codegray},
+    basicstyle=\ttfamily\small,
+    keywordstyle=\bfseries,
+    commentstyle=\color{commentgray},
+    stringstyle=\ttfamily,
+    numbers=left,
+    numberstyle=\tiny,
+    numbersep=8pt,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    showstringspaces=false,
+    tabsize=4,
+    columns=fullflexible
+}
+
+\lstdefinestyle{jsonstyle}{
+    backgroundcolor=\color{codegray},
+    basicstyle=\ttfamily\small,
+    numbers=none,
+    frame=single,
+    breaklines=true,
+    showstringspaces=false,
+    columns=fullflexible
+}
+
+\begin{document}
+
+\section*{Resumen}
+\addcontentsline{toc}{section}{Resumen}
+
+Se elaboró un sistema cliente-servidor en C++
+para mensajes de texto, con el protocolo TCP para que varios clientes pudieran comunicarse entre sí por medio de  un servidor central, que
+administra a los usuarios conectados, si están disponibles y las salas de conversación. Los clientes pueden enviarse
+y recibir mensajes por línea de comandos.
+
+La comunicación entre servidor y clientes es por JSON
+delimitados por saltos de línea, para formatear los datos de
+identificación de los clientes, la lista de los que están conectados, sus cambios de
+estado, los mensajes privados que se envían y los mensajes públicos de las salas, y creación de
+salas, invitaciones y desconexiones.
+
+Luego, como el servidor debe atender a la vez a varios clientes, se
+usa un hilo independiente por cada conexión, y las estructuras de datos
+compartidas se protegen por "mutex" de la
+biblioteca estándar, en especial para evitar el problema de carrera.
+
+Todo el sistema, tanto el del servidor como el del cliente están en C++17 con sockets de Berkeley/POSIX,
+la biblioteca estándar de hilos y la de encabezado nlohmann/json para los JSON, y el sistema de construcción es CMake porque resultó el más sencillo para compilar. En las pruebas se validaron la identificación, manejo de usuarios, comunicación entre clientes, creación
+de salas, invitaciones, entrada y salida de salas, y tratar mensajes inválidos y el límite máximo de tamaño del mensaje, que es de
+$1\,048\,576$ bytes.
+
+\section{Introducción}
+
+Como habíamos visto en clase, como dos procesos que se ejecutan en máquinas
+distintas no pueden compartir directamente su memoria, requieren de
+un mecanismo de comunicación para que se compartan información estructuradamente.
+
+Y precisamente una d e las alternativas más usadas es
+comunicar las máquinas por sockets, y un socket puede entenderse como un punto
+final de comunicación que deja enviar y recibir información
+en una red. En el caso de TCP, la comunicación se da
+por una conexión a flujo, que entrega ordenadamente la información de los bytes que se transmiten.
+
+Este proyecto consiste en implementar un servidor de chat que pueda
+atender a varios clientes concurrentemente. El servidor funciona como
+punto central para mantener el estado de los usuarios
+conectados, las salas existentes y determinar cuáles clientes deben
+recibir cada mensaje.
+
+El sistema debe
+interpretar varias operaciones y mantener la información mientras las conexiones siguen activas. Sea por caso que para
+enviar un mensaje privado es necesario localizar al destinatario y si no existe no se le envía nada, o para enviar un mensaje a una sala es necesario verificar antes que el emisor sea
+miembro, y para aceptar una invitación es necesario validar que
+la invitación exista.
+
+Entonces el sistema se comunica por sockets TCP, representa los mensajes con JSON y usa estructuras de datos concurrentes para los usuarios y las salas.
+
+\section{Diseño}
+\subsection{Arquitectura}
+
+Como ya se dijo, la arquitectura es cliente-servidor. Hay un proceso
+servidor que permanece escuchando conexiones entrantes en un puerto TCP
+específico (que se puede cambiar), y cada cliente establece una conexión el servidor para enviar operaciones y recibir respuestas o
+notificaciones del estado de los otros usuarios.
+
+Entonces la arquitectura general es de este estilo:
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=1.7cm and 1.5cm,
+    caja/.style={
+        rectangle,
+        rounded corners,
+        draw,
+        minimum width=3.2cm,
+        minimum height=1.1cm,
+        align=center
+    },
+    flecha/.style={
+        -{Latex[length=3mm]},
+        thick
+    }
+]
+
+\node[caja] (c1) {Cliente 1};
+\node[caja, below=of c1] (c2) {Cliente 2};
+\node[caja, below=of c2] (c3) {Cliente 3};
+
+\node[caja, right=4cm of c2, minimum width=4cm, minimum height=2cm]
+    (server) {\textbf{Servidor}\\TCP / JSON\\Usuarios y salas};
+
+\draw[flecha] (c1.east) -- node[above,sloped]{TCP} (server.north west);
+\draw[flecha] (c2.east) -- node[above]{TCP} (server.west);
+\draw[flecha] (c3.east) -- node[below,sloped]{TCP} (server.south west);
+
+\draw[flecha] (server.north west) -- ++(-1.1,0.6);
+\draw[flecha] (server.west) -- ++(-1.1,0);
+\draw[flecha] (server.south west) -- ++(-1.1,-0.6);
+
+\end{tikzpicture}
+
+\caption{Arquitectura general}
+\label{fig:arquitectura}
+\end{figure}
+
+El servidor es el encargado de mantener el estado global de todo el
+sistema. Entonces los clientes no mantienen directamente información sobre los demás
+usuarios ni sobre la pertenencia a las salas, y en lugar de eso, hacen
+solicitudes al servidor y reciben información de los cambios.
+
+\subsection{Modelo de comunicación}
+
+La comunicación usa JSON que terminan en salto de línea \texttt{\textbackslash n}, así aunque  hay un flujo
+continuo de bytes por TCP, el servidor tiene un límite entre mensajes.
+
+Por ejemplo, una solicitud de identificación se escribe como:
+\begin{lstlisting}[style=jsonstyle]
+{"type":"IDENTIFY","username":"Hugo"}
+\end{lstlisting}
+
+El servidor procesa los bytes que recibe hasta encontrar
+\texttt{\textbackslash n}, luego interpreta la cadena como JSON y
+obtiene el campo de type, que indica la operación solicitada.
+
+Entonces esto también deja que un mensaje sea recibido en varios
+fragmentos, porque la aplicación no depende de que una llamada a read() reciba un mensaje completo.
+
+\subsection{Modelo de datos}
+
+El estado de los usuarios se representa con la estructura de \texttt{InfoCliente}:
+
+\begin{lstlisting}[style=cppstyle]
+struct InfoCliente {
+    int conexion_cliente;
+    std::string username;
+    std::string status = "ACTIVE";
+};
+\end{lstlisting}
+
+Cada usuario tiene un socket asociado, un nombre de usuario y un estado.
+
+Y los únicos estados que hay son: 
+
+\begin{itemize}
+    \item \texttt{ACTIVE};
+    \item \texttt{AWAY};
+    \item \texttt{BUSY};
+\end{itemize}
+
+Los usuarios conectados se almacenan en un
+std::unordered\_map, con su nombre de usuario como llave.
+Se eligió así para localizar a los usuarios por nombre con menor complejidad en tiempo O(1) en el caso promedio.
+
+Las salas utilizan la estructura de:
+\begin{lstlisting}[style=cppstyle]
+struct InfoSala {
+    std::unordered_set<std::string> miembros;
+    std::unordered_set<std::string> invitados;
+};
+\end{lstlisting}
+
+Cada sala tiene dos conjuntos ajenos, donde el primero es de
+los usuarios que ya pertenecen a la sala y el segundo es de
+los que recibieron invitación pero todavía no se unen.
+
+Las salas se almacenan también por un
+std::unordered\_map con su nombre como llave.
+
+\subsection{Operaciones}
+
+Estas son las únicas operaciones que el cliente puede solicitar al servidor:
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{p{3.0cm}p{9.0cm}}
+\toprule
+\textbf{Operación} & \textbf{Descripción} \\
+\midrule
+\texttt{IDENTIFY} &
+Identifica al cliente por nombre de usuario. \\
+
+\texttt{STATUS} &
+Cambia el estado del usuario entre \texttt{ACTIVE}, \texttt{AWAY} y
+\texttt{BUSY}. \\
+
+\texttt{USERS} &
+Solicita la lista de usuarios conectados y sus estados. \\
+
+\texttt{TEXT} &
+Envía un mensaje privado a otro usuario. \\
+
+\texttt{PUBLIC\_TEXT} &
+Envía un mensaje a todos los usuarios conectados menos al emisor. \\
+
+\texttt{NEW\_ROOM} &
+Crea una nueva sala y hace al creador su primer miembro. \\
+
+\texttt{INVITE} &
+Invita a uno o más usuarios a una sala. \\
+
+\texttt{JOIN\_ROOM} &
+Para que un usuario invitado se una a una sala. \\
+
+\texttt{ROOM\_USERS} &
+Obtiene la lista de miembros de una sala. \\
+
+\texttt{ROOM\_TEXT} &
+Envía un mensaje a los demás miembros de una sala. \\
+
+\texttt{LEAVE\_ROOM} &
+Para que un usuario abandone una sala. \\
+
+\texttt{DISCONNECT} &
+Termina voluntariamente la conexión del usuario. \\
+\bottomrule
+\end{tabular}
+\caption{Lista de operaciones del servidor.}
+\label{tab:operaciones}
+\end{table}
+
+\subsection{Identificación de usuarios}
+
+La identificación es estrictamente el primer paso para que una conexión al servidor sea válida. La única operación que el servidor acepta mientras el usuario no se haya identificado es 
+\texttt{IDENTIFY}. Cualquier otra entrada que se le pase da respuesta de error
+y cierra la conexión.
+
+Si el nombre solicitado no está registrado todavía, el servidor asocia el socket
+con el usuario y pone su estado inicial como \texttt{ACTIVE}. Además,
+cuando un usuario se registra y el servidor ya tenía usuarios previos, los demás usuarios conectados reciben una notificación de
+\texttt{NEW\_USER}.
+
+El límite para el nombre de usuario es de ocho caracteres.
+
+\subsection{Modelo de salas}
+
+La administración de salas es por invitación y aceptación.
+
+O sea que primero, un usuario crea una sala por la operación de \texttt{NEW\_ROOM}, y ya que la crea se incorpora en automático como miembro.
+
+Después, un miembro puede invitar a otros usuarios mediante con \texttt{INVITE}, pero esa invitación no convierte al usuario invitado en
+miembro, solo lo agrega al conjunto de invitados.
+
+El usuario invitado puede usar \texttt{JOIN\_ROOM} para unirse, y al aceptar
+se elimina del conjunto de invitados y se agrega al de miembros.
+
+Por último, un miembro puede usar \texttt{LEAVE\_ROOM} para abandonar
+la sala, y cuando una sala se queda sin miembros se elimina del servidor.
+
+\subsection{Concurrencia}
+
+El servidor debe atender en simultáneo varias conexiones y para eso cuando se acepta una nueva conexión también se crea un hilo independiente así:
+
+\begin{lstlisting}[style=cppstyle]
+std::thread(manejar_cliente, socket_cliente).detach();
+\end{lstlisting}
+
+La función de \texttt{manejar\_cliente} contiene el ciclo principal de
+procesamiento de cada cliente.
+
+El uso de varios hilos da precisamente el acceso concurrente a las estructuras que ya se dijeron. Por ejemplo, mientras que un hilo modifica el estado de un usuario,
+otro podría estar solicitando la lista de usuarios.
+
+Y justamente para proteger los datos se usan dos mutex:
+
+\begin{lstlisting}[style=cppstyle]
+std::mutex mutex_clientes;
+std::mutex mutex_salas;
+\end{lstlisting}
+
+El primero protege el mapa de usuarios y el segundo las estructuras de las salas.
+
+Entonces se pueden ejecutar distintas operaciones concurrentemente siempre que no necesiten modificar el mismo estado compartido.
+
+
+\section{Implementación}
+
+\subsection{Lo que se usó}
+
+Para el proyecto se usó lo siguiente:
+
+\begin{itemize}
+    \item C++ 17 para el servidor y para el cliente, y la y la Standard Library para las estrucuturas, hilos y cadenas.
+    \item Sockets POSIX/Berkeley para la comunicación TCP.
+    \item TCP para comunicarse en  la misma red.
+    \item nlohmann/json para analizar los JSON.
+    \item CMake para configurar y construir todo el proyecto.
+\end{itemize}
+
+El proyecto se divide en dos ejecutables que son \texttt{server.cpp} para el proceso del servidor, y \texttt{client} para el del cliente.
+
+La biblioteca \texttt{json.hpp} está en el directorio \texttt{external}, así que el proyecto puede compilarse sin tener que instalarla.
+
+\subsection{Inicialización del servidor}
+
+La primera etapa del servidor es crear un socket:
+
+\begin{lstlisting}[style=cppstyle]
+int socket_servidor = socket(AF_INET, SOCK_STREAM, 0);
+\end{lstlisting}
+
+Para lo que se usará la familia de direcciones
+AF\_INET, SOCK\_STREAM para un socket de flujo y el protocolo predeterminado de TCP.
+
+Luego se configura la dirección con:
+
+\begin{lstlisting}[style=cppstyle]
+direccion_servidor.sin_family = AF_INET;
+direccion_servidor.sin_addr.s_addr = INADDR_ANY;
+direccion_servidor.sin_port = htons(8080);
+\end{lstlisting}
+
+El servidor se asocia al puerto por \texttt{bind()} y empieza a
+aceptar conexiones por \texttt{listen()}.
+
+Y por último, el servidor entra en un ciclo en donde llama a \texttt{accept()}.
+
+\subsection{Atención de conexiones}
+
+Cada conexión aceptada obtiene una conexión de cliente independiente, o sea un descritor de socket, y el servidor crea un hilo para atenderlo:
+
+\begin{lstlisting}[style=cppstyle]
+if(socket_cliente >= 0) {
+    std::thread(manejar_cliente, socket_cliente).detach();
+}
+\end{lstlisting}
+
+Se usa \texttt{detach()} para dejar que el hilo quede ejecutándose independientemente del hilo principal, mientras que el principal continúa
+aceptando nuevas conexiones.
+
+En \texttt{manejar\_cliente} se mantiene un ciclo que recibe mensajes,
+los interpreta como JSON y ejecuta la operación que se le pide.
+
+\subsection{Recepción de mensajes}
+
+La función para reconstruir los mensajes es
+\texttt{leer\_linea}, y usa el salto de línea \texttt{\textbackslash n} como delimitador.
+
+Y como ya se había explicado, la función no supone que una llamada a \texttt{read()} sea un
+mensaje completo, así que podría obtener los bytes progresivamente y acumuarlos en un \texttt{std::string} hasta encontrar salto de línea.
+
+Además, se estableció un límite máximo de:
+
+\[
+1024^2 = 1\,048\,576\text{ bytes}.
+\]
+
+Y si el mensaje supera dicho tamaño, el servidor responde con una operación
+inválida y termina la conexión.
+
+Es claro que esto es para evitar que un cliente pueda provocar un crecimiento ilimitado de la cadena utilizada para almacenar un mensaje recibido.
+
+\subsection{Procesamiento de los JSON}
+
+Una vez que se reconstruye una línea, el servidor usa:
+
+\begin{lstlisting}[style=cppstyle]
+json mensaje = json::parse(cadena_buffer);
+\end{lstlisting}
+
+para convertir el texto en JSON.
+
+El tipo de operación solicitada se obtiene con:
+
+\begin{lstlisting}[style=cppstyle]
+std::string tipo = mensaje.at("type");
+\end{lstlisting}
+
+Aquí es donde se selecciona la rama correspondiente por una condicional.
+
+Si el mensaje no puede analizarse como JSON, tiene campos faltantes o un valor inválido, se captura la excepción y se responde con:
+
+\begin{lstlisting}[style=jsonstyle]
+{
+    "type": "RESPONSE",
+    "operation": "INVALID",
+    "result": "INVALID"
+}
+\end{lstlisting}
+
+En seguida se termina la conexión.
+
+\subsection{Envío de mensajes}
+
+Todos los mensajes enviados por el servidor se serializan usando \texttt{dump()} y se les agrega un salto de línea así:
+
+\begin{lstlisting}[style=cppstyle]
+std::string datos = mensaje.dump() + "\n";
+write(conexion_cliente, datos.c_str(), datos.length());
+\end{lstlisting}
+
+La función de \texttt{enviar\_mensaje} centraliza esto comportamiento y evita que cada operación deba seriarse una por una.
+
+Por ejemplo, cuando se envía un mensaje privado, el servidor construye:
+
+\begin{lstlisting}[style=jsonstyle]
+{
+    "type": "TEXT_FROM",
+    "username": "emisor",
+    "text": "Hola"
+}
+\end{lstlisting}
+
+y lo transmite al socket del destinatario.
+
+\subsection{Mensajes privados y públicos}
+
+Para \texttt{TEXT}, primero el servidor busca al destinatario en el mapa de
+clientes, y si existe envía el mensaje únicamente a ese socket.
+
+Si no, da una respuesta indicando que el usuario solicitado no está disponible.
+
+Por otro lado, \texttt{PUBLIC\_TEXT} recorre todos los usuarios conectados y a todos envía el menos a quien lo mandó.
+
+\subsection{Administración de salas}
+
+Con \texttt{NEW\_ROOM} se verifica que el nombre de la sala no exista.
+Cuando una se crea, se inserta en automático al usuario creador en el conjunto de miembros.
+
+Para límitar el nombre de las salas menor o igual a 16 caracteres se implementó una función
+auxiliar:
+
+\begin{lstlisting}[style=cppstyle]
+bool nombre_sala_valido(const std::string& nombre_sala) {
+    return nombre_sala.length() <= 16;
+}
+\end{lstlisting}
+
+Y se usa en todas las operaciones de salas.
+
+Con \texttt{INVITE} se comprueba que la sala exista y que el emisor sea miembro de ella. Después comprueba los usuarios destinatarios y
+envía las invitaciones.
+
+En \texttt{JOIN\_ROOM}, se comprueba que la sala exista y que el usuario tenga una invitación pendiente. Si ambas condiciones se cumplen,
+elimina la invitación y agrega al usuario a los miembros.
+
+\texttt{ROOM\_USERS} y \texttt{ROOM\_TEXT} requieren que el usuario solicitante pertenezca a la sala. Así se impide que un usuario no
+miembro pueda consultar sus integrantes o usarla para transmitir mensajes.
+
+Y por último, \texttt{LEAVE\_ROOM} elimina al usuario de los miembros y notifica a los integrantes que quedan.
+
+\subsection{Desconexión}
+
+La desconexión puede ocurrir explícitamente al usar \texttt{DISCONNECT} o como consecuencia de un error.
+
+Cuando un usuario identificado abandona el servidor, se dan dos tareas. Primero, se elimina al usuario de las salas en las que participaba y se notifica a los demás miembros por mensajes con \texttt{LEFT\_ROOM}.
+Después se elimina su registro del mapa de clientes y se notifica a los
+usuarios restantes mediante un mensaje \texttt{DISCONNECTED}.
+
+Y así ya no quedan referencias cuando un usuario sale.
+
+\section{Pruebas}
+
+La implementación se sometió a pruebas manuales utilizando varias conexiones de cliente. Se quería ver el funcionamiento normal como el comportamiento a entradas inválidas.
+
+\subsection{Identificación}
+
+Se probó \texttt{IDENTIFY} con nombres válidos y con otros que superaban el límite de 8 caracteres.
+
+Uno de exactamente ocho caracteres fue aceptado correctamente, y uno de mayor longitud se rechazó y terminó la conexión.
+
+También se probó la identificación duplicada. Cuando un segundo cliente
+intentó utilizar un nombre ya registrado, el servidor lo detectó por el mapa de clientes.
+
+\subsection{Estados de usuario}
+
+Se verificaron \texttt{ACTIVE}, \item \texttt{AWAY} y \item \texttt{BUSY}.
+
+Se probó un valor fuera del conjunto permitido. El servidor lo identificó como inválido y terminó la conexión.
+
+\subsection{Comunicación}
+
+Se probaron mensajes privados y públicos usando más de un cliente.
+
+Para mensajes privados se probó que solamente el destinatario recibiera la notificación de \texttt{TEXT\_FROM}. Para los públicos se verificó que los demás usuarios recibieran \texttt{PUBLIC\_TEXT\_FROM}.
+
+También se probó que un destinatario inexistente produjera la respuesta correspondiente.
+
+\subsection{Salas}
+
+Las operaciones para creación, invitación, incorporación, consulta, envío de
+mensajes y abandono de salas fueron probadas individualmente.
+
+Se verificaron en especial estos casos:
+
+\begin{itemize}
+    \item creación de una sala nueva;
+    \item intento de crear una sala existente;
+    \item invitación de usuarios;
+    \item intento de invitar usuarios inexistentes;
+    \item incorporación de un usuario invitado;
+    \item intento de incorporación sin invitación;
+    \item consulta de integrantes;
+    \item envío de mensajes a una sala;
+    \item abandono de una sala.
+\end{itemize}
+
+También se verificó el límite de 16 caracteres para los nombres de las salas.
+Una de exactamente 16 caracteres fue aceptada, y una con 17 fue rechazada.
+
+\subsection{Mensajes inválidos}
+
+Se probó el envío de operaciones inexistentes, como por ejemplo:
+
+\begin{lstlisting}[style=jsonstyle]
+{"type":"HOLA"}
+\end{lstlisting}
+
+El servidor respondió como:
+
+\begin{lstlisting}[style=jsonstyle]
+{
+    "type": "RESPONSE",
+    "operation": "INVALID",
+    "result": "INVALID"
+}
+\end{lstlisting}
+
+y después terminó la conexión.
+
+También se probó enviar una operación sin un campo obligatorio, y en este caso el acceso por \texttt{at()} genera una excepción, que es capturada y se procesa como mensaje inválido.
+
+\subsection{Tamaño máximo de mensaje}
+
+Una prueba adicional consistió en enviar un mensaje cuyo tamaño superaba
+$1\,048\,576$ bytes.
+
+El servidor detectó que el mensaje superó el límite y respondió con:
+
+\begin{lstlisting}[style=jsonstyle]
+{
+    "type": "RESPONSE",
+    "operation": "INVALID",
+    "result": "INVALID"
+}
+\end{lstlisting}
+
+De inmediato cerró la conexión correspondiente.
+
+Con eso también se comprobó que el límite de tamaño se aplica al mensaje completo en vez de al individual de cada llamada a \texttt{read()}.
+
+\section{Conclusiones}
+
+El proyecto permitió hacer un sistema de comunicación cliente-servidor
+con varias conexiones a la vez con TCP. El servidor tiene un estado global compuesto por usuarios y salas, y cada cliente
+se comunica con el servidor por JSON.
+
+En el desarrollo se comprendió que TCP
+da un flujo de bytes y no mensajes individuales. Para eso se usó un delimitador de línea y una cadena acumuladora para reconstruir mensajes aunque sean recibidos en varios fragmentos.
+
+El uso de JSON permitió representar uniformemente las operaciones. Con el campo de \texttt{type} se permitió distinguir
+las diferencias de las solicitudes, y los campos adicionales con los datos necesarios por operación.
+
+Para las salas se requirió diferenciar específicamente entre miembros e invitadospara poder representar las operaciones de creación, invitación, aceptación, comunicación y abandono.
+
+Para la concurrencia, el servidor crea un hilo
+por cliente, que deja que una conexión quede esperando los datos sin impedir que el servidor pueda atender a otras conexiones, y mutex se usó para poder proteger las estructuras compartidas entre los hilos.
+
+En conclusión, se logró implementar el proyecto en C++ con sockets, seriación de
+información y concurrencia,
+
+
+\begin{thebibliography}{9}
+
+\bibitem{cppreference}
+cppreference.com.
+\textit{C++ Reference}.
+Documentación de referencia.
+
+\bibitem{posix}
+The Open Group.
+\textit{The Open Group Base Specifications}.
+
+\bibitem{socket}
+Linux man-pages.
+\textit{socket(2) -- create an endpoint for communication}.
+
+\bibitem{bind}
+Linux man-pages.
+\textit{bind(2) -- bind a name to a socket}.
+
+
+\bibitem{listen}
+Linux man-pages.
+\textit{listen(2) -- listen for connections on a socket}.
+
+\bibitem{accept}
+Linux man-pages.
+\textit{accept(2) -- accept a connection on a socket}.
+
+\bibitem{read}
+Linux man-pages.
+\textit{read(2) -- read from a file descriptor}.
+
+\bibitem{write}
+Linux man-pages.
+\textit{write(2) -- write to a file descriptor}.
+
+\bibitem{nlohmann}
+Niels Lohmann.
+\textit{JSON for Modern C++}.
+
+\bibitem{cmake}
+Kitware.
+\textit{CMake Documentation}.
+
+\end{thebibliography}
+
+\end{document}
